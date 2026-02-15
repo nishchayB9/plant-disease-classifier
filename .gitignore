@@ -1,0 +1,9 @@
+venv/
+*.pyc
+*.log
+.DS_Store
+.python-version
+orven/
+.gradio/
+.vscode/
+*.pkl
