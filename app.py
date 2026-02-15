@@ -12,10 +12,9 @@ model_path = hf_hub_download(
     filename=MODEL_FILENAME
 )
 
-learner = load_learner(model_path)
+learner = load_learner(model_path, cpu=True)
 
 def classify_image(img):
-    img = FAImage(img)
     preds, idx, probs = learner.predict(img)
     return {learner.dls.vocab[i]: float(probs[i]) for i in range(len(probs))}
 
