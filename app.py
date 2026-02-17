@@ -17,10 +17,8 @@ learner.dls.after_item = Pipeline([])
 learner.dls.after_batch = Pipeline([])
 
 def classify_image(img):
-    img = FAImage.create(img)
-    dl = learner.dls.test_dl([img])
-    preds, _ = learner.get_preds(dl=dl)
-    probs = preds[0]
+    # FastAI's predict handles PIL images and single-item transforms correctly
+    pred, pred_idx, probs = learner.predict(img)
     return dict(zip(learner.dls.vocab, map(float, probs)))
 
 interface = gr.Interface(
