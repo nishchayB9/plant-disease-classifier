@@ -13,6 +13,8 @@ model_path = hf_hub_download(
 )
 
 learner = load_learner(model_path, cpu=True)
+learner.dls.after_item = Pipeline([])
+learner.dls.after_batch = Pipeline([])
 
 def classify_image(img):
     img = FAImage.create(img)
