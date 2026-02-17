@@ -1,9 +1,10 @@
-fastai
-torch
-torchvision
-torchaudio
-timm
+fastai==2.7.19
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
+numpy==1.26.4
+pandas==2.1.4
+timm==0.9.12
+huggingface-hub
 gradio
-huggingface_hub
-cloudpickle
 ipython
