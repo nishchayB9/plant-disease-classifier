@@ -12,18 +12,12 @@ model_path = hf_hub_download(
     filename=MODEL_FILENAME
 )
 
-learner = load_learner(model_path,)
+learner = load_learner(model_path,cpu=True)
 
 
 def classify_image(img):
     img = PILImage.create(img)
-
-    # Create test dataloader WITHOUT training augmentations
-    dl = learner.dls.test_dl([img], with_labels=False)
-
-    preds, _ = learner.get_preds(dl=dl)
-    probs = preds[0]
-
+    pred, pred_idx, probs = learner.predict(img)
     return dict(zip(learner.dls.vocab, map(float, probs)))
 
 interface = gr.Interface(
