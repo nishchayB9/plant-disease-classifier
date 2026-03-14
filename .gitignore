@@ -7,3 +7,5 @@ orven/
 .gradio/
 .vscode/
 *.pkl
+*.pth
+classes.json
