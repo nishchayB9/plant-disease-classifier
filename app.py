@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import timm
 import json
+from PIL import Image
+from torchvision import transforms
 from huggingface_hub import hf_hub_download
 
 MODEL_REPO   = "Nishchayb9/plant-disease-efficientnetv2-b3"
@@ -23,13 +25,6 @@ NUM_CLASSES = len(classes)
 # ── Load raw state dict ────────────────────────────────────────────────────────
 raw_sd = torch.load(model_path, map_location=device)
 
-# ── Read head dimensions directly from saved tensors ──────────────────────────
-bn1_size    = raw_sd["1.2.running_mean"].shape[0]   # 3072
-linear1_out = raw_sd["1.4.weight"].shape[0]         # 512
-bn2_size    = raw_sd["1.6.running_mean"].shape[0]   # 512
-
-print(f"Head dims: BN1={bn1_size}, Linear1→{linear1_out}, BN2={bn2_size}, out={NUM_CLASSES}")
-
 # ── Remap backbone keys ────────────────────────────────────────────────────────
 backbone_sd = {
     k[len("0.model."):]: v
@@ -37,61 +32,60 @@ backbone_sd = {
     if k.startswith("0.model.")
 }
 
-# ── Build backbone — num_classes=0 returns raw features ───────────────────────
+# ── Build timm backbone ────────────────────────────────────────────────────────
 backbone = timm.create_model(
     "tf_efficientnetv2_b3.in21k",
     pretrained=False,
-    num_classes=0
+    num_classes=0,
+    global_pool=""
 )
-backbone.load_state_dict(backbone_sd, strict=True)
+# Weights were saved in fp16 due to .to_fp16() during training — convert to fp32
+backbone_sd_fp32 = {k: v.float() for k, v in backbone_sd.items()}
+backbone.load_state_dict(backbone_sd_fp32, strict=False)
 
-# ── FastAI uses AdaptiveConcatPool → backbone output is 3072 (1536*2) ─────────
-# We implement this in the forward pass below
-
-# ── Build FastAI head state dict and load via load_state_dict ─────────────────
-# Build layers with correct sizes, then load all weights at once using
-# load_state_dict — this correctly handles running_mean/var as buffers
+# ── FastAI head ────────────────────────────────────────────────────────────────
 class FastAIHead(nn.Module):
-    def __init__(self, bn1_size, linear1_out, bn2_size, num_classes):
+    def __init__(self):
         super().__init__()
-        self.bn1     = nn.BatchNorm1d(bn1_size)
-        self.drop1   = nn.Dropout(p=0.25)
-        self.lin1    = nn.Linear(bn1_size, linear1_out, bias=False)
-        self.relu    = nn.ReLU(inplace=True)
-        self.bn2     = nn.BatchNorm1d(bn2_size)
-        self.drop2   = nn.Dropout(p=0.5)
-        self.lin2    = nn.Linear(linear1_out, num_classes, bias=False)
+        self.ap    = nn.AdaptiveAvgPool2d(1)
+        self.mp    = nn.AdaptiveMaxPool2d(1)
+        self.bn1   = nn.BatchNorm1d(3072, eps=1e-05, momentum=0.1)
+        self.drop1 = nn.Dropout(p=0.25)
+        self.lin1  = nn.Linear(3072, 512, bias=False)
+        self.relu  = nn.ReLU(inplace=True)
+        self.bn2   = nn.BatchNorm1d(512, eps=1e-05, momentum=0.1)
+        self.drop2 = nn.Dropout(p=0.5)
+        self.lin2  = nn.Linear(512, NUM_CLASSES, bias=False)
 
     def forward(self, x):
+        avg = self.ap(x).flatten(1)
+        mx  = self.mp(x).flatten(1)
+        x   = torch.cat([avg, mx], dim=1)
         x = self.bn1(x)
         x = self.drop1(x)
         x = self.lin1(x)
         x = self.relu(x)
         x = self.bn2(x)
         x = self.drop2(x)
-        x = self.lin2(x)
-        return x
+        return self.lin2(x)
 
-head = FastAIHead(bn1_size, linear1_out, bn2_size, NUM_CLASSES)
-
-# Load via proper state dict mapping
-head_sd = {
-    "bn1.weight":          raw_sd["1.2.weight"].float(),
-    "bn1.bias":            raw_sd["1.2.bias"].float(),
-    "bn1.running_mean":    raw_sd["1.2.running_mean"].float(),
-    "bn1.running_var":     raw_sd["1.2.running_var"].float(),
+head = FastAIHead()
+head.load_state_dict({
+    "bn1.weight":              raw_sd["1.2.weight"].float(),
+    "bn1.bias":                raw_sd["1.2.bias"].float(),
+    "bn1.running_mean":        raw_sd["1.2.running_mean"].float(),
+    "bn1.running_var":         raw_sd["1.2.running_var"].float(),
     "bn1.num_batches_tracked": raw_sd["1.2.num_batches_tracked"],
-    "lin1.weight":         raw_sd["1.4.weight"].float(),
-    "bn2.weight":          raw_sd["1.6.weight"].float(),
-    "bn2.bias":            raw_sd["1.6.bias"].float(),
-    "bn2.running_mean":    raw_sd["1.6.running_mean"].float(),
-    "bn2.running_var":     raw_sd["1.6.running_var"].float(),
+    "lin1.weight":             raw_sd["1.4.weight"].float(),
+    "bn2.weight":              raw_sd["1.6.weight"].float(),
+    "bn2.bias":                raw_sd["1.6.bias"].float(),
+    "bn2.running_mean":        raw_sd["1.6.running_mean"].float(),
+    "bn2.running_var":         raw_sd["1.6.running_var"].float(),
     "bn2.num_batches_tracked": raw_sd["1.6.num_batches_tracked"],
-    "lin2.weight":         raw_sd["1.8.weight"].float(),
-}
-head.load_state_dict(head_sd, strict=False)
+    "lin2.weight":             raw_sd["1.8.weight"].float(),
+})
 
-# ── Full model with AdaptiveConcatPool ────────────────────────────────────────
+# ── Full model ─────────────────────────────────────────────────────────────────
 class PlantDiseaseModel(nn.Module):
     def __init__(self, backbone, head):
         super().__init__()
@@ -99,20 +93,27 @@ class PlantDiseaseModel(nn.Module):
         self.head     = head
 
     def forward(self, x):
-        x = self.backbone.forward_features(x)   # (B, C, H, W)
-        # AdaptiveConcatPool: avg + max → concat → flatten → (B, C*2)
-        avg = x.mean(dim=[2, 3])
-        mx  = x.amax(dim=[2, 3])
-        x   = torch.cat([avg, mx], dim=1)        # (B, 3072)
-        x   = self.head(x)
-        return x
+        x = self.backbone(x)   # (B, 1536, 12, 12)
+        return self.head(x)
 
 model = PlantDiseaseModel(backbone, head)
 model.eval()
 
-# ── Image preprocessing ────────────────────────────────────────────────────────
-data_config = timm.data.resolve_model_data_config(backbone)
-transform   = timm.data.create_transform(**data_config, is_training=False)
+# ── Image preprocessing — matches training EXACTLY ────────────────────────────
+# Training pipeline:
+#   item_tfms = Resize(460)          → squish to 460x460 (no crop)
+#   batch_tfms = aug_transforms(size=384) → at inference: squish to 384x384
+#   Normalize.from_stats(*imagenet_stats)
+#
+# FastAI's Resize default is ResizeMethod.Squish → PIL BILINEAR stretch to square
+transform = transforms.Compose([
+    transforms.Resize((384, 384), interpolation=Image.BILINEAR),  # squish to 384x384
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 def classify_image(image):
